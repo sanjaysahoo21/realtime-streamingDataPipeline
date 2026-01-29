@@ -67,6 +67,8 @@ services:
         condition: service_healthy
     volumes:
       - ./spark/app:/app
+      - ./data/lake:/opt/spark/data/lake
+      - ./data/checkpoints:/opt/spark/data/checkpoints
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       DB_URL: jdbc:postgresql://db:5432/${DB_NAME}
