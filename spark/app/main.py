@@ -1,15 +1,15 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     from_json, col, to_timestamp, current_timestamp, 
-    window, count, countDistinct, to_json, struct, to_date
+    window, count, countDistinct, to_json, struct, to_date, session_window, min, max
 )
 from pyspark.sql.types import (
     StructType, StructField, StringType, TimestampType, LongType
 )
-# from pyspark.sql.streaming import GroupStateTimeout  <-- Removed
+# from pyspark.sql.streaming import GroupStateTimeout
 import pandas as pd
 import os
-# import psycopg2  <-- Moved inside function to avoid worker conflicts
+# import psycopg2  
 
 spark = SparkSession.builder \
     .appName("RealtimePipeline") \
@@ -131,21 +131,19 @@ q1 = page_counts_df.writeStream \
 # ----------------------------
 # 2. Active Users (Sliding Window 5 min, slide 1 min)
 # ----------------------------
-# Note: countDistinct is not supported in streaming with Update mode.
-# Using approx_count_distinct as per requirements.
 from pyspark.sql.functions import approx_count_distinct
 
 active_users_df = events_df \
     .groupBy(window("event_time", "5 minutes", "1 minute")) \
-    .agg(approx_count_distinct("user_id").alias("active_users_count")) \
+    .agg(approx_count_distinct("user_id").alias("active_user_count")) \
     .select(
         col("window.start").alias("window_start"),
         col("window.end").alias("window_end"),
-        col("active_users_count")
+        col("active_user_count")
     )
 
 q2 = active_users_df.writeStream \
-    .foreachBatch(lambda df, id: write_to_postgres(df, id, "active_users", ["window_start"], ["active_users_count"])) \
+    .foreachBatch(lambda df, id: write_to_postgres(df, id, "active_users", ["window_start"], ["active_user_count"])) \
     .outputMode("update") \
     .option("checkpointLocation", "/opt/spark/data/checkpoints/active_users") \
     .start()
@@ -153,26 +151,27 @@ q2 = active_users_df.writeStream \
 # ----------------------------
 # 3. Session State (Native Spark Session Window)
 # ----------------------------
-# Using native session_window to avoid PyArrow/UDF instabilities
-# Session gap of 5 minutes (if no activity for 5 mins, session closes)
 sessions_df = events_df \
-    .withWatermark("event_time", "2 minutes") \
     .groupBy(
         session_window(col("event_time"), "5 minutes"),
         col("user_id")
     ) \
-    .agg(count("*").alias("event_count")) \
+    .agg(
+        min("event_time").alias("session_start_time"),
+        max("event_time").alias("session_end_time"),
+        count("*").alias("event_count")
+    ) \
     .select(
         col("user_id"),
-        col("session_window.start").alias("session_start_time"),
-        col("session_window.end").alias("session_end_time"),
-        (col("session_window.end").cast("long") - col("session_window.start").cast("long")).alias("session_duration_seconds")
+        col("session_start_time"),
+        col("session_end_time"),
+        (col("session_end_time").cast("long") - col("session_start_time").cast("long")).alias("session_duration_seconds")
     )
 
 q3 = sessions_df.writeStream \
-    .foreachBatch(lambda df, id: write_to_postgres(df, id, "user_sessions", ["user_id", "session_start_time"], ["session_end_time", "session_duration_seconds"])) \
+    .foreachBatch(lambda df, id: write_to_postgres(df, id, "user_sessions", ["user_id"], ["session_start_time", "session_end_time", "session_duration_seconds"])) \
     .outputMode("append") \
-    .option("checkpointLocation", "/opt/spark/data/checkpoints/sessions") \
+    .option("checkpointLocation", "/opt/spark/data/checkpoints/user_sessions") \
     .start()
 
 # ----------------------------

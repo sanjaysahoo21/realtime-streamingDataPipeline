@@ -9,7 +9,7 @@ CREATE TABLE page_view_counts (
 CREATE TABLE active_users(
     window_start TIMESTAMP NOT NULL,
     window_end TIMESTAMP NOT NULL,
-    active_users_count BIGINT,
+    active_user_count BIGINT,
     PRIMARY KEY (window_start)
 );
 
