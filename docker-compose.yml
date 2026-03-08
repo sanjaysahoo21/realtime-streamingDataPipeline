@@ -22,7 +22,7 @@ services:
       zookeeper:
         condition: service_healthy
     ports:
-      - "9092:9092"
+      # Port 9092 is for internal container-to-container communication only; do not expose to host.
       - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1

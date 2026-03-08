@@ -1,7 +1,7 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    from_json, col, to_timestamp, current_timestamp, 
-    window, count, countDistinct, to_json, struct, to_date, session_window, min, max
+    from_json, col, to_timestamp, current_timestamp,
+    window, session_window, count, countDistinct, to_json, struct, to_date, min, max
 )
 from pyspark.sql.types import (
     StructType, StructField, StringType, TimestampType, LongType
@@ -23,9 +23,12 @@ spark.sparkContext.setLogLevel("WARN")
 # ----------------------------
 DB_NAME = os.getenv("DB_NAME", "stream_data")
 DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
+DB_PASSWORD = os.environ["DB_PASSWORD"]  # No fallback — fail fast if not set
 DB_HOST = "db"
 DB_PORT = "5432"
+
+# Whitelist of tables allowed for writes — prevents SQL injection
+_ALLOWED_TABLES = {"page_view_counts", "active_users", "user_sessions"}
 
 def get_db_connection():
     import psycopg2
@@ -73,38 +76,48 @@ def write_to_postgres(batch_df, batch_id, table_name, pk_cols, update_cols):
     """
     Writes a batch DataFrame to PostgreSQL using INSERT ON CONFLICT (UPSERT).
     """
+    # SQL injection guard: only allow known table names
+    if table_name not in _ALLOWED_TABLES:
+        raise ValueError(f"Table '{table_name}' is not in the allowed tables whitelist.")
+
     def process_partition(iterator):
+        conn = None
+        cur = None
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            
+
             for row in iterator:
                 columns = list(row.asDict().keys())
-                values = [row[col] for col in columns]
-                
-                # Construct SQL
+                values = [row[c] for c in columns]
+
+                # Construct SQL — column names come from the fixed Spark schema (not user input)
                 cols_str = ", ".join(columns)
                 placeholders = ", ".join(["%s"] * len(values))
-                
+
                 # ON CONFLICT clause
                 pk_str = ", ".join(pk_cols)
-                update_set = ", ".join([f"{col} = EXCLUDED.{col}" for col in update_cols])
-                
+                update_set = ", ".join([f"{ucol} = EXCLUDED.{ucol}" for ucol in update_cols])
+
                 sql = f"""
                     INSERT INTO {table_name} ({cols_str})
                     VALUES ({placeholders})
                     ON CONFLICT ({pk_str})
                     DO UPDATE SET {update_set};
                 """
-                
+
                 cur.execute(sql, values)
-            
+
             conn.commit()
-            cur.close()
-            conn.close()
         except Exception as e:
-            print(f"Error writing to DB: {e}")
-            # In production, handle correctly (retry or DLQ)
+            if conn:
+                conn.rollback()
+            raise RuntimeError(f"DB write failed for table '{table_name}': {e}") from e
+        finally:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
 
     batch_df.foreachPartition(process_partition)
 
